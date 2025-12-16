@@ -8,6 +8,17 @@ from selenium_ui.jira.pages.pages import Login, PopupManager, Issue, Project, Se
 from util.api.jira_clients import JiraRestClient
 from util.conf import JIRA_SETTINGS
 
+from selenium.common.exceptions import WebDriverException
+
+def dismiss_popups(webdriver):
+    # Never let popup handling fail the test itself
+    try:
+        PopupManager(webdriver).dismiss_default_popup()
+    except WebDriverException:
+        pass
+    except Exception:
+        pass
+
 client = JiraRestClient(
     JIRA_SETTINGS.server_url,
     JIRA_SETTINGS.admin_login,
@@ -79,7 +90,10 @@ def login(webdriver, datasets):
             login_page.set_credentials(
                 username=datasets['current_session']['username'],
                 password=datasets['current_session']['password'])
+
             login_page.wait_for_dashboard_or_first_login_loaded()
+            dismiss_popups(webdriver)   # <---
+
             if login_page.is_first_login():
                 login_page.first_login_setup()
             if login_page.is_first_login_second_page():
@@ -100,6 +114,7 @@ def login(webdriver, datasets):
 
 
 def view_issue(webdriver, datasets):
+    dismiss_popups(webdriver)
     issue_page = Issue(
         webdriver,
         issue_key=datasets['current_session']['issue_key'])
@@ -127,12 +142,15 @@ def view_project_summary(webdriver, datasets):
 
 def create_issue(webdriver, dataset):
     issue_modal = Issue(webdriver)
-    webdriver.refresh()         # page refresh is needed for small dataset run stability
+    webdriver.refresh()
 
     @print_timing("selenium_create_issue")
     def measure():
+        dismiss_popups(webdriver)  # <--- add (after refresh)
+
         @print_timing("selenium_create_issue:open_quick_create")
         def sub_measure():
+            dismiss_popups(webdriver)  # <--- add (right before clicking Create)
             issue_modal.open_create_issue_modal()
 
         sub_measure()
@@ -155,7 +173,7 @@ def create_issue(webdriver, dataset):
         sub_measure()
 
     measure()
-    PopupManager(webdriver).dismiss_default_popup()
+    dismiss_popups(webdriver)
 
 
 def search_jql(webdriver, datasets):
