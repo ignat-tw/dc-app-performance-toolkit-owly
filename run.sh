@@ -49,6 +49,9 @@ REPORTS_DIR="/dc-app-performance-toolkit/app/reports_generation"
 JIRA_YML="${REPO_ROOT}/app/jira.yml"
 CONF_YML="${REPO_ROOT}/app/confluence.yml"
 
+PYTHON_VERSION_DEFAULT="3.13.1"
+REQUIREMENTS_TXT="${REPO_ROOT}/requirements.txt"
+
 # =========================
 # Helpers
 # =========================
@@ -80,20 +83,26 @@ Usage:
   ./run.sh <target> [options]
 
 Targets:
-  jira                 Run DCAPT locally using app/jira.yml
-  confluence           Run DCAPT locally using app/confluence.yml
-  run <file.yml>       Run DCAPT locally using a specific yml (relative or absolute)
-  reports perf         Generate performance regression report (uses app/reports_generation/performance_profile.yml)
-  reports scale        Generate scalability report (uses app/reports_generation/scale_profile.yml)
-  list                 Show available targets and detected config files
-  help                 Show this help
+  jira                  Run DCAPT locally using app/jira.yml
+  confluence            Run DCAPT locally using app/confluence.yml
+  run <file.yml>        Run DCAPT locally using a specific yml (relative or absolute)
+  reports perf          Generate performance regression report (uses app/reports_generation/performance_profile.yml)
+  reports scale         Generate scalability report (uses app/reports_generation/scale_profile.yml)
+  list                  Show available targets and detected config files
+  help                  Show this help
+
+  install-pyenv         Install pyenv (macOS via brew) + add shell init snippet
+  install-python [ver]  Install Python via pyenv and set repo-local version (.python-version)
+  install-deps          Install python deps from requirements.txt
+  run-local jira        Run bzt locally against app/jira.yml (no docker)
+  run-local confluence  Run bzt locally against app/confluence.yml (no docker)
 
 Options:
-  --platform <p>       Docker platform (default: ${DEFAULT_PLATFORM})
-  --shm <size>         Docker shm-size (default: ${DEFAULT_SHM})
-  --pull               Add --pull=always to docker run
-  --visible            Export WEBDRIVER_VISIBLE=True inside container (Selenium Chrome visible)
-  --dry-run            Print docker command but do not execute
+  --platform <p>        Docker platform (default: ${DEFAULT_PLATFORM})
+  --shm <size>          Docker shm-size (default: ${DEFAULT_SHM})
+  --pull                Add --pull=always to docker run
+  --visible             Export WEBDRIVER_VISIBLE=True inside container (Selenium Chrome visible)
+  --dry-run             Print docker command but do not execute
 
 Examples:
   ./run.sh jira
@@ -101,6 +110,11 @@ Examples:
   ./run.sh run app/jira.yml
   ./run.sh reports perf
   ./run.sh reports scale --pull
+
+  ./run.sh install-pyenv
+  ./run.sh install-python 3.13.1
+  ./run.sh install-deps
+  ./run.sh run-local jira
 
 Notes:
   - This script runs the toolkit from the local repo using docker.
@@ -233,6 +247,98 @@ run_reports() {
 }
 
 # =========================
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_pyenv_init_hint() {
+  cat <<'EOF'
+INFO: If pyenv is installed but 'python' is still not found, add to ~/.zshrc:
+
+  export PYENV_ROOT="$HOME/.pyenv"
+  command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
+  eval "$(pyenv init -)"
+
+Then run:
+  source ~/.zshrc
+EOF
+}
+
+install_pyenv_macos() {
+  if have_cmd pyenv; then
+    echo "INFO: pyenv already installed: $(pyenv --version)"
+    return 0
+  fi
+  if ! have_cmd brew; then
+    die "Homebrew not found. Install brew first: https://brew.sh"
+  fi
+
+  echo "==> Installing pyenv via brew..."
+  brew update
+  brew install pyenv
+
+  echo "==> Adding pyenv init to ~/.zshrc (if missing)..."
+  local zshrc="${HOME}/.zshrc"
+  grep -q 'eval "$(pyenv init -)"' "$zshrc" 2>/dev/null || cat >>"$zshrc" <<'EOF'
+
+# pyenv
+export PYENV_ROOT="$HOME/.pyenv"
+command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
+eval "$(pyenv init -)"
+EOF
+
+  ensure_pyenv_init_hint
+}
+
+install_python_with_pyenv() {
+  local pyver="${1:-$PYTHON_VERSION_DEFAULT}"
+  have_cmd pyenv || die "pyenv is not installed. Run: ./run.sh install-pyenv"
+
+  echo "==> Installing Python ${pyver} (if missing)..."
+  pyenv install -s "${pyver}"
+
+  echo "==> Setting repo-local python to ${pyver}"
+  (cd "${REPO_ROOT}" && pyenv local "${pyver}")
+
+  pyenv rehash
+
+  echo "==> Verifying python..."
+  python -V || {
+    echo "WARN: 'python' not found in current shell (pyenv not initialized)."
+    ensure_pyenv_init_hint
+    exit 1
+  }
+}
+
+install_python_deps() {
+  local pyver="${1:-$PYTHON_VERSION_DEFAULT}"
+  [[ -f "${REQUIREMENTS_TXT}" ]] || die "Missing ${REQUIREMENTS_TXT}"
+
+  if ! have_cmd python; then
+    echo "INFO: python not found. Trying to set up via pyenv..."
+    install_python_with_pyenv "${pyver}"
+  fi
+
+  echo "==> Upgrading pip tooling..."
+  python -m pip install --upgrade pip setuptools wheel
+
+  echo "==> Installing deps from ${REQUIREMENTS_TXT} ..."
+  python -m pip install -r "${REQUIREMENTS_TXT}"
+
+  echo "==> Sanity checks:"
+  python -c "import sys; print('python:', sys.version)"
+  python -m bzt -h >/dev/null 2>&1 && echo "bzt: OK" || echo "bzt: NOT FOUND"
+}
+
+run_bzt_local() {
+  local yml="${1:-${JIRA_YML}}"
+  ensure_file "$yml"
+
+  have_cmd python || die "python not found. Run: ./run.sh install-python"
+  echo "==> Running locally: python -m bzt $(basename "$yml")"
+  (cd "${REPO_ROOT}/app" && python -m bzt "$(basename "$yml")")
+}
+
+# =========================
 # Arg parsing
 # =========================
 target="${1:-help}"
@@ -287,6 +393,26 @@ case "$target" in
     [[ "$mode" == "perf" || "$mode" == "scale" ]] || die "Usage: ./run.sh reports perf|scale"
     run_reports "$mode" "${platform}" "${pull_flag}" "${dry_run}"
     ;;
+  install-pyenv)
+    install_pyenv_macos
+    ;;
+  install-python)
+    pyver="${1:-$PYTHON_VERSION_DEFAULT}"
+    install_python_with_pyenv "${pyver}"
+    ;;
+  install-deps)
+    pyver="${1:-$PYTHON_VERSION_DEFAULT}"
+    install_python_deps "${pyver}"
+    ;;
+  run-local)
+    sub="${1:-jira}"
+    case "$sub" in
+      jira) run_bzt_local "${JIRA_YML}" ;;
+      confluence) run_bzt_local "${CONF_YML}" ;;
+      *) die "Usage: ./run.sh run-local jira|confluence" ;;
+    esac
+    ;;
+
   *)
     die "Unknown target: $target (run './run.sh help')"
     ;;
