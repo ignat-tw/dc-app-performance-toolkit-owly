@@ -140,7 +140,7 @@ run_dcapt_yml() {
   ensure_file "$yml_path"
 
   local -a cmd=(
-    docker run --rm
+    docker run --rm --init
     --platform="${platform}"
     --shm-size="${shm}"
   )
@@ -206,7 +206,7 @@ run_reports() {
   fi
 
   local -a cmd=(
-    docker run --rm
+    docker run --rm --init
     --platform="${platform}"
   )
 
