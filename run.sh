@@ -45,10 +45,12 @@ DEFAULT_SHM="4g"
 APP_DIR="/dc-app-performance-toolkit/app"
 REPORTS_DIR="/dc-app-performance-toolkit/app/reports_generation"
 
-# Known config files (local paths relative to repo root)
 JIRA_YML="${REPO_ROOT}/app/jira.yml"
 CONF_YML="${REPO_ROOT}/app/confluence.yml"
 
+# Local python setup
+VENV_DIR="${REPO_ROOT}/.venv"
+DEPS_MARKER="${VENV_DIR}/.deps-installed"
 PYTHON_VERSION_DEFAULT="3.13.1"
 REQUIREMENTS_TXT="${REPO_ROOT}/requirements.txt"
 
@@ -56,11 +58,11 @@ REQUIREMENTS_TXT="${REPO_ROOT}/requirements.txt"
 # Helpers
 # =========================
 die() { echo "ERROR: $*" >&2; exit 1; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 print_cmd() {
   echo ""
   echo ">>> Executing:"
-  # print with line breaks for readability
   printf '%s \\\n' "$@" | sed '$ s/ \\$//'
   echo ""
 }
@@ -74,6 +76,74 @@ ensure_repo_layout() {
   [[ -d "${REPO_ROOT}/app" ]] || die "Expected ${REPO_ROOT}/app to exist. Run from dc-app-performance-toolkit repo root."
 }
 
+# -------------------------
+# pyenv bootstrap (script-local)
+# -------------------------
+pyenv_bootstrap() {
+  # Make pyenv visible even if shell init wasn't loaded
+  export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
+  export PATH="$PYENV_ROOT/bin:$PATH"
+
+  if have_cmd pyenv; then
+    # IMPORTANT: init sets PATH so "python" becomes pyenv shim
+    eval "$(pyenv init -)"
+    echo "INFO: pyenv OK: $(pyenv --version)"
+    if [[ -f "${REPO_ROOT}/.python-version" ]]; then
+      echo "INFO: repo python version: $(cat "${REPO_ROOT}/.python-version")"
+    else
+      echo "INFO: repo python version file missing: ${REPO_ROOT}/.python-version"
+    fi
+  else
+    echo "INFO: pyenv NOT found in PATH"
+  fi
+}
+
+# -------------------------
+# venv bootstrap
+# -------------------------
+venv_activate() {
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "INFO: venv missing: ${VENV_DIR}"
+    echo "INFO: Run: ./run.sh venv-create"
+    return 1
+  fi
+
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
+  echo "INFO: venv activated: ${VENV_DIR}"
+  echo "INFO: python: $(python -V 2>&1)"
+  echo "INFO: pip: $(python -m pip -V 2>&1 || true)"
+  return 0
+}
+
+local_preflight() {
+  ensure_repo_layout
+  pyenv_bootstrap
+
+  if ! have_cmd python; then
+    echo "INFO: python NOT found"
+    echo "INFO: Run: ./run.sh install-python ${PYTHON_VERSION_DEFAULT}"
+    return 1
+  fi
+
+  venv_activate || return 1
+
+  if [[ ! -f "${DEPS_MARKER}" ]]; then
+    echo "INFO: deps marker missing: ${DEPS_MARKER}"
+    echo "INFO: Run: ./run.sh install-deps"
+    return 1
+  fi
+
+  # quick sanity
+  if ! python -m bzt -h >/dev/null 2>&1; then
+    echo "INFO: bzt not runnable in venv"
+    echo "INFO: Run: ./run.sh install-deps"
+    return 1
+  fi
+
+  return 0
+}
+
 # =========================
 # Help / targets
 # =========================
@@ -82,43 +152,39 @@ show_help() {
 Usage:
   ./run.sh <target> [options]
 
-Targets:
-  jira                  Run DCAPT locally using app/jira.yml
-  confluence            Run DCAPT locally using app/confluence.yml
-  run <file.yml>        Run DCAPT locally using a specific yml (relative or absolute)
-  reports perf          Generate performance regression report (uses app/reports_generation/performance_profile.yml)
-  reports scale         Generate scalability report (uses app/reports_generation/scale_profile.yml)
+Docker targets:
+  jira                  Run DCAPT in docker using app/jira.yml
+  confluence            Run DCAPT in docker using app/confluence.yml
+  run <file.yml>        Run DCAPT in docker using a specific yml
+  reports perf          Generate performance regression report
+  reports scale         Generate scalability report
   list                  Show available targets and detected config files
-  help                  Show this help
 
-  install-pyenv         Install pyenv (macOS via brew) + add shell init snippet
-  install-python [ver]  Install Python via pyenv and set repo-local version (.python-version)
-  install-deps          Install python deps from requirements.txt
-  run-local jira        Run bzt locally against app/jira.yml (no docker)
-  run-local confluence  Run bzt locally against app/confluence.yml (no docker)
+Local (no docker) targets:
+  install-pyenv         Install pyenv (macOS via brew) + add zsh init snippet
+  install-python [ver]  Install Python via pyenv + set repo-local version (.python-version)
+  venv-create           Create repo-local venv at ${VENV_DIR}
+  install-deps          Install deps into venv from ${REQUIREMENTS_TXT} and write deps marker
+  run-local jira        Run locally: python -m bzt app/jira.yml (auto pyenv+venv if ready)
+  run-local confluence  Run locally: python -m bzt app/confluence.yml (auto pyenv+venv if ready)
+  status                Print pyenv/python/venv/deps status
 
-Options:
+Options (docker only):
   --platform <p>        Docker platform (default: ${DEFAULT_PLATFORM})
   --shm <size>          Docker shm-size (default: ${DEFAULT_SHM})
   --pull                Add --pull=always to docker run
-  --visible             Export WEBDRIVER_VISIBLE=True inside container (Selenium Chrome visible)
+  --visible             Export WEBDRIVER_VISIBLE=True inside container
   --dry-run             Print docker command but do not execute
 
 Examples:
-  ./run.sh jira
-  ./run.sh confluence --visible
-  ./run.sh run app/jira.yml
-  ./run.sh reports perf
-  ./run.sh reports scale --pull
-
-  ./run.sh install-pyenv
+  ./run.sh status
   ./run.sh install-python 3.13.1
+  ./run.sh venv-create
   ./run.sh install-deps
   ./run.sh run-local jira
 
-Notes:
-  - This script runs the toolkit from the local repo using docker.
-  - It does NOT do k8s / terraform. Only the "run toolkit locally" + "generate reports" workflows.
+  ./run.sh jira
+  ./run.sh confluence --visible
 EOF
 }
 
@@ -130,10 +196,12 @@ list_targets() {
   echo "  - run <file.yml>"
   echo "  - reports perf"
   echo "  - reports scale"
+  echo "  - install-pyenv / install-python / venv-create / install-deps / run-local / status"
   echo ""
   echo "Detected config files:"
   [[ -f "$JIRA_YML" ]] && echo "  - app/jira.yml" || echo "  - app/jira.yml (missing)"
   [[ -f "$CONF_YML" ]] && echo "  - app/confluence.yml" || echo "  - app/confluence.yml (missing)"
+  [[ -f "$REQUIREMENTS_TXT" ]] && echo "  - requirements.txt" || echo "  - requirements.txt (missing)"
   echo ""
   echo "Repo root:"
   echo "  ${REPO_ROOT}"
@@ -163,7 +231,6 @@ run_dcapt_yml() {
     cmd+=( --pull=always )
   fi
 
-  # Mount repo into container
   cmd+=(
     -v "${REPO_ROOT}:/dc-app-performance-toolkit"
     -w "${APP_DIR}"
@@ -173,11 +240,8 @@ run_dcapt_yml() {
     cmd+=( -e WEBDRIVER_VISIBLE=True )
   fi
 
-  # image + arg
   cmd+=( "${DOCKER_IMAGE_RUN}" "$(basename "$yml_path")" )
 
-  # DCAPT expects the yml in /dc-app-performance-toolkit/app when invoked like "dcapt jira.yml"
-  # If user passed a yml that is not under app/, we copy it into app/ temporarily.
   local yml_dir
   yml_dir="$(cd "$(dirname "$yml_path")" && pwd)"
   local app_local_dir="${REPO_ROOT}/app"
@@ -186,9 +250,7 @@ run_dcapt_yml() {
     echo "INFO: YML is not in app/. Copying into app/ for this run..."
     local tmp_name="_tmp_$(basename "$yml_path")"
     cp -f "$yml_path" "${REPO_ROOT}/app/${tmp_name}"
-    # update command to use tmp file name
     cmd[-1]="${tmp_name}"
-    yml_path="${REPO_ROOT}/app/${tmp_name}"
   fi
 
   print_cmd "${cmd[@]}"
@@ -247,22 +309,8 @@ run_reports() {
 }
 
 # =========================
-
-have_cmd() { command -v "$1" >/dev/null 2>&1; }
-
-ensure_pyenv_init_hint() {
-  cat <<'EOF'
-INFO: If pyenv is installed but 'python' is still not found, add to ~/.zshrc:
-
-  export PYENV_ROOT="$HOME/.pyenv"
-  command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
-  eval "$(pyenv init -)"
-
-Then run:
-  source ~/.zshrc
-EOF
-}
-
+# Local install targets
+# =========================
 install_pyenv_macos() {
   if have_cmd pyenv; then
     echo "INFO: pyenv already installed: $(pyenv --version)"
@@ -286,37 +334,57 @@ command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 EOF
 
-  ensure_pyenv_init_hint
+  echo "INFO: done. Restart terminal or run: source ~/.zshrc"
 }
 
 install_python_with_pyenv() {
   local pyver="${1:-$PYTHON_VERSION_DEFAULT}"
-  have_cmd pyenv || die "pyenv is not installed. Run: ./run.sh install-pyenv"
+
+  pyenv_bootstrap
+  have_cmd pyenv || die "pyenv not installed. Run: ./run.sh install-pyenv"
 
   echo "==> Installing Python ${pyver} (if missing)..."
   pyenv install -s "${pyver}"
 
-  echo "==> Setting repo-local python to ${pyver}"
+  echo "==> Setting repo-local python to ${pyver} (.python-version)"
   (cd "${REPO_ROOT}" && pyenv local "${pyver}")
 
   pyenv rehash
+  pyenv_bootstrap
 
-  echo "==> Verifying python..."
-  python -V || {
-    echo "WARN: 'python' not found in current shell (pyenv not initialized)."
-    ensure_pyenv_init_hint
-    exit 1
-  }
+  have_cmd python || die "python still not visible after pyenv init. Restart terminal or run: source ~/.zshrc"
+  echo "INFO: python now: $(python -V 2>&1)"
 }
 
-install_python_deps() {
-  local pyver="${1:-$PYTHON_VERSION_DEFAULT}"
-  [[ -f "${REQUIREMENTS_TXT}" ]] || die "Missing ${REQUIREMENTS_TXT}"
+venv_create() {
+  ensure_repo_layout
+  pyenv_bootstrap
 
-  if ! have_cmd python; then
-    echo "INFO: python not found. Trying to set up via pyenv..."
-    install_python_with_pyenv "${pyver}"
+  have_cmd python || die "python not found. Run: ./run.sh install-python ${PYTHON_VERSION_DEFAULT}"
+
+  if [[ -d "${VENV_DIR}" ]]; then
+    echo "INFO: venv already exists: ${VENV_DIR}"
+    return 0
   fi
+
+  echo "==> Creating venv: ${VENV_DIR}"
+  python -m venv "${VENV_DIR}"
+  echo "INFO: venv created."
+  echo "INFO: Next: ./run.sh install-deps"
+}
+
+install_deps() {
+  ensure_repo_layout
+  ensure_file "${REQUIREMENTS_TXT}"
+  pyenv_bootstrap
+
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "INFO: venv missing: ${VENV_DIR}"
+    echo "INFO: Run: ./run.sh venv-create"
+    exit 1
+  fi
+
+  venv_activate
 
   echo "==> Upgrading pip tooling..."
   python -m pip install --upgrade pip setuptools wheel
@@ -324,16 +392,47 @@ install_python_deps() {
   echo "==> Installing deps from ${REQUIREMENTS_TXT} ..."
   python -m pip install -r "${REQUIREMENTS_TXT}"
 
-  echo "==> Sanity checks:"
-  python -c "import sys; print('python:', sys.version)"
-  python -m bzt -h >/dev/null 2>&1 && echo "bzt: OK" || echo "bzt: NOT FOUND"
+  echo "==> Writing deps marker: ${DEPS_MARKER}"
+  date > "${DEPS_MARKER}"
+
+  echo "INFO: deps installed. bzt version:"
+  python -m bzt --version || true
+}
+
+status() {
+  ensure_repo_layout
+  echo "== Status =="
+  pyenv_bootstrap
+
+  if have_cmd python; then
+    echo "INFO: python: $(python -V 2>&1)"
+    echo "INFO: python path: $(command -v python)"
+  else
+    echo "INFO: python: NOT FOUND"
+  fi
+
+  if [[ -d "${VENV_DIR}" ]]; then
+    echo "INFO: venv: present (${VENV_DIR})"
+  else
+    echo "INFO: venv: missing (${VENV_DIR})"
+  fi
+
+  if [[ -f "${DEPS_MARKER}" ]]; then
+    echo "INFO: deps marker: present ($(cat "${DEPS_MARKER}" 2>/dev/null || true))"
+  else
+    echo "INFO: deps marker: missing (${DEPS_MARKER})"
+  fi
 }
 
 run_bzt_local() {
-  local yml="${1:-${JIRA_YML}}"
+  local yml="$1"
   ensure_file "$yml"
 
-  have_cmd python || die "python not found. Run: ./run.sh install-python"
+  if ! local_preflight; then
+    echo "ERROR: local environment not ready. Fix via targets above (status/install-python/venv-create/install-deps)."
+    exit 1
+  fi
+
   echo "==> Running locally: python -m bzt $(basename "$yml")"
   (cd "${REPO_ROOT}/app" && python -m bzt "$(basename "$yml")")
 }
@@ -350,7 +449,6 @@ pull_flag="false"
 webdriver_visible="false"
 dry_run="false"
 
-# parse global flags
 while [[ "${1:-}" =~ ^-- ]]; do
   case "$1" in
     --platform) platform="${2:-}"; shift 2 ;;
@@ -367,25 +465,15 @@ done
 # Dispatch
 # =========================
 case "$target" in
-  help|-h|--help)
-    show_help
-    ;;
-  list)
-    list_targets
-    ;;
-  jira)
-    run_dcapt_yml "${JIRA_YML}" "${platform}" "${shm}" "${pull_flag}" "${webdriver_visible}" "${dry_run}"
-    ;;
-  confluence)
-    run_dcapt_yml "${CONF_YML}" "${platform}" "${shm}" "${pull_flag}" "${webdriver_visible}" "${dry_run}"
-    ;;
+  help|-h|--help) show_help ;;
+  list) list_targets ;;
+
+  jira) run_dcapt_yml "${JIRA_YML}" "${platform}" "${shm}" "${pull_flag}" "${webdriver_visible}" "${dry_run}" ;;
+  confluence) run_dcapt_yml "${CONF_YML}" "${platform}" "${shm}" "${pull_flag}" "${webdriver_visible}" "${dry_run}" ;;
   run)
     [[ "${1:-}" != "" ]] || die "Usage: ./run.sh run <file.yml>"
-    # allow relative paths from repo root
     yml_arg="$1"
-    if [[ "$yml_arg" != /* ]]; then
-      yml_arg="${REPO_ROOT}/${yml_arg}"
-    fi
+    if [[ "$yml_arg" != /* ]]; then yml_arg="${REPO_ROOT}/${yml_arg}"; fi
     run_dcapt_yml "${yml_arg}" "${platform}" "${shm}" "${pull_flag}" "${webdriver_visible}" "${dry_run}"
     ;;
   reports)
@@ -393,17 +481,11 @@ case "$target" in
     [[ "$mode" == "perf" || "$mode" == "scale" ]] || die "Usage: ./run.sh reports perf|scale"
     run_reports "$mode" "${platform}" "${pull_flag}" "${dry_run}"
     ;;
-  install-pyenv)
-    install_pyenv_macos
-    ;;
-  install-python)
-    pyver="${1:-$PYTHON_VERSION_DEFAULT}"
-    install_python_with_pyenv "${pyver}"
-    ;;
-  install-deps)
-    pyver="${1:-$PYTHON_VERSION_DEFAULT}"
-    install_python_deps "${pyver}"
-    ;;
+
+  install-pyenv) install_pyenv_macos ;;
+  install-python) install_python_with_pyenv "${1:-$PYTHON_VERSION_DEFAULT}" ;;
+  venv-create) venv_create ;;
+  install-deps) install_deps ;;
   run-local)
     sub="${1:-jira}"
     case "$sub" in
@@ -412,8 +494,7 @@ case "$target" in
       *) die "Usage: ./run.sh run-local jira|confluence" ;;
     esac
     ;;
+  status) status ;;
 
-  *)
-    die "Unknown target: $target (run './run.sh help')"
-    ;;
+  *) die "Unknown target: $target (run './run.sh help')" ;;
 esac
