@@ -36,6 +36,7 @@ set -euo pipefail
 # Config
 # =========================
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DOCKER_IMAGE_RUN="atlassian/dcapt"
 DOCKER_IMAGE_REPORTS="atlassian/dcapt"
 
@@ -53,6 +54,10 @@ VENV_DIR="${REPO_ROOT}/.venv"
 DEPS_MARKER="${VENV_DIR}/.deps-installed"
 PYTHON_VERSION_DEFAULT="3.13.1"
 REQUIREMENTS_TXT="${REPO_ROOT}/requirements.txt"
+
+# Taurus override: cache pip-install packages (avoid reinstall every run)
+# See: modules.pip-install.temp=false
+BZT_PIP_INSTALL_CACHE_OPTS=( -o "modules.pip-install.temp=false" )
 
 # =========================
 # Helpers
@@ -104,7 +109,7 @@ pyenv_bootstrap() {
 venv_activate() {
   if [[ ! -d "${VENV_DIR}" ]]; then
     echo "INFO: venv missing: ${VENV_DIR}"
-    echo "INFO: Run: ./run.sh venv-create"
+    echo "INFO: Next step: ./run.sh venv-create"
     return 1
   fi
 
@@ -134,10 +139,9 @@ local_preflight() {
     return 1
   fi
 
-  # quick sanity
   if ! python -m bzt -h >/dev/null 2>&1; then
     echo "INFO: bzt not runnable in venv"
-    echo "INFO: Run: ./run.sh install-deps"
+    echo "INFO: Next step: ./run.sh install-deps"
     return 1
   fi
 
@@ -316,9 +320,7 @@ install_pyenv_macos() {
     echo "INFO: pyenv already installed: $(pyenv --version)"
     return 0
   fi
-  if ! have_cmd brew; then
-    die "Homebrew not found. Install brew first: https://brew.sh"
-  fi
+  have_cmd brew || die "Homebrew not found. Install brew first: https://brew.sh"
 
   echo "==> Installing pyenv via brew..."
   brew update
@@ -395,8 +397,16 @@ install_deps() {
   echo "==> Writing deps marker: ${DEPS_MARKER}"
   date > "${DEPS_MARKER}"
 
-  echo "INFO: deps installed. bzt version:"
-  python -m bzt --version || true
+  echo "INFO: deps installed. versions:"
+  python -V
+  python - <<'PY'
+from importlib.metadata import version, PackageNotFoundError
+for pkg in ("bzt", "selenium", "locust", "pytest"):
+    try:
+        print(f"{pkg}=={version(pkg)}")
+    except PackageNotFoundError:
+        print(f"{pkg}: NOT INSTALLED")
+PY
 }
 
 status() {
@@ -433,8 +443,8 @@ run_bzt_local() {
     exit 1
   fi
 
-  echo "==> Running locally: python -m bzt $(basename "$yml")"
-  (cd "${REPO_ROOT}/app" && python -m bzt "$(basename "$yml")")
+  echo "==> Running locally: python -m bzt ${BZT_PIP_INSTALL_CACHE_OPTS[*]} $(basename "$yml")"
+  (cd "${REPO_ROOT}/app" && python -m bzt "${BZT_PIP_INSTALL_CACHE_OPTS[@]}" "$(basename "$yml")")
 }
 
 # =========================
