@@ -211,12 +211,64 @@ class BasePage:
     def execute_js(self, js):
         return self.driver.execute_script(js)
 
-    def rest_api_get(self, url):
-        return self.execute_js(js=f"""
-        return fetch('{url}')
-                    .then(response => response.json())
-                    .then(data => data);
-        """)
+    def rest_api_get(self, url, label="rest_api_get", max_body=3000):
+        """
+        Fetch JSON using the browser session.
+        If response isn't JSON, dump status/content-type/url + body prefix to console
+        and return a dict with diagnostics (so caller won't crash on JSON.parse).
+        """
+        # NOTE: execute_script returns immediately; we MUST return a Promise chain.
+        js = """
+        const url = arguments[0];
+        const label = arguments[1];
+        const maxBody = arguments[2];
+
+        return fetch(url, { credentials: 'same-origin' })
+          .then(async (resp) => {
+            const ct = (resp.headers.get('content-type') || '');
+            const finalUrl = resp.url || url;
+            const status = resp.status;
+            const ok = resp.ok;
+
+            // Always read body as text first (prevents JSON parse crash)
+            const text = await resp.text();
+
+            // Best-effort JSON parse
+            let parsed = null;
+            let jsonOk = false;
+            try {
+              parsed = JSON.parse(text);
+              jsonOk = true;
+            } catch (e) {
+              jsonOk = false;
+            }
+
+            if (!jsonOk) {
+              const prefix = text.slice(0, maxBody);
+              console.log(`[${label}] NON-JSON response`);
+              console.log(`[${label}] status=${status} ok=${ok} ct=${ct} url=${finalUrl}`);
+              console.log(`[${label}] body_prefix:\\n${prefix}\\n--- END body_prefix ---`);
+
+              // Return diagnostics as object (Python gets a dict)
+              return {
+                "__error__": "NON_JSON",
+                "label": label,
+                "status": status,
+                "ok": ok,
+                "contentType": ct,
+                "url": finalUrl,
+                "body_prefix": prefix
+              };
+            }
+
+            return parsed;
+          })
+          .catch((e) => {
+            console.log(`[${label}] FETCH ERROR: ${e}`);
+            return { "__error__": "FETCH_ERROR", "label": label, "message": String(e), "url": url };
+          });
+        """
+        return self.driver.execute_script(js, url, label, max_body)
 
     @property
     def app_version(self):
